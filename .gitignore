@@ -9,3 +9,4 @@ installer/*.exe
 
 # local reports / tooling
 relatorio.txt
+release-notes.md

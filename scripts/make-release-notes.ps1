@@ -15,12 +15,18 @@ if (-not $repo) { $repo = 'jhonata192/master-code' }
 $version = $tag -replace '^v', ''
 
 # intervalo de commits desde a ultima tag (se houver)
-$previous = git describe --tags --abbrev=0 "$tag^" 2>$null
-if ($LASTEXITCODE -ne 0) {
+$previous = $null
+try {
+  $prevOut = git describe --tags --abbrev=0 "$tag^" 2>$null
+  if ($LASTEXITCODE -eq 0 -and $prevOut) { $previous = $prevOut.Trim() }
+} catch {
   $previous = $null
+}
+if (-not $previous) {
   Write-Host 'Nenhuma tag anterior encontrada; usando todos os commits.' -ForegroundColor Yellow
 }
 
+$log = $null
 if ($previous) {
   $log = git log "$previous..$tag" --pretty=format:"%s" --no-merges
 } else {
@@ -34,23 +40,23 @@ if ($log) {
 
 # agrupa por tipo conventional commit
 $groups = @{
-  feat = @()
-  fix  = @()
-  docs = @()
-  perf = @()
-  refactor = @()
-  test = @()
-  build = @()
-  ci = @()
-  chore = @()
+  feat = [System.Collections.ArrayList]@()
+  fix  = [System.Collections.ArrayList]@()
+  docs = [System.Collections.ArrayList]@()
+  perf = [System.Collections.ArrayList]@()
+  refactor = [System.Collections.ArrayList]@()
+  test = [System.Collections.ArrayList]@()
+  build = [System.Collections.ArrayList]@()
+  ci = [System.Collections.ArrayList]@()
+  chore = [System.Collections.ArrayList]@()
 }
 $order = @('feat', 'fix', 'docs', 'perf', 'refactor', 'test', 'build', 'ci', 'chore')
 $labels = @{
   feat = 'Adicionado'
   fix  = 'Corrigido'
-  docs = 'Documentação'
+  docs = 'Documentacao'
   perf = 'Performance'
-  refactor = 'Refatoração'
+  refactor = 'Refatoracao'
   test = 'Testes'
   build = 'Build'
   ci = 'CI/CD'
@@ -65,72 +71,81 @@ foreach ($line in $commits) {
     $subject = $match.Groups[3].Value.Trim()
     if ($groups.ContainsKey($type)) {
       $entry = $subject
-      if ($scope) { $entry = "**$scope:** $subject" }
-      $groups[$type] += $entry
+      if ($scope) { $entry = "${scope}: ${subject}" }
+      [void]$groups[$type].Add($entry)
     }
   }
 }
 
+$nl = [Environment]::NewLine
+
 # monta release notes
-$notes = @()
-$notes += "## $version"
-$notes += ""
-$notes += "Lançado via GitHub Actions. Consulte o [CHANGELOG]($repo/blob/main/CHANGELOG.md) para detalhes."
-$notes += ""
-$notes += "### Artefatos"
-$notes += ""
-$notes += "- `master-code.exe` — executável standalone (Node SEA)"
-$notes += "- `master-code-setup.exe` — instalador Windows (Inno Setup)"
-$notes += "- `SHA256SUMS.txt` — checksums SHA-256 de ambos os artefatos"
-$notes += ""
+$notes = [System.Collections.ArrayList]@()
+[void]$notes.Add("## $version")
+[void]$notes.Add('')
+[void]$notes.Add("Lancado via GitHub Actions. Consulte o CHANGELOG ($repo/blob/main/CHANGELOG.md) para detalhes.")
+[void]$notes.Add('')
+[void]$notes.Add('### Artefatos')
+[void]$notes.Add('')
+[void]$notes.Add('- master-code.exe - executavel standalone (Node SEA)')
+[void]$notes.Add('- master-code-setup.exe - instalador Windows (Inno Setup)')
+[void]$notes.Add('- SHA256SUMS.txt - checksums SHA-256 de ambos os artefatos')
+[void]$notes.Add('')
 
 $hasContent = $false
 foreach ($type in $order) {
   if ($groups[$type].Count -gt 0) {
     $hasContent = $true
-    $notes += "### $($labels[$type])"
-    $notes += ""
+    [void]$notes.Add("### $($labels[$type])")
+    [void]$notes.Add('')
     foreach ($entry in $groups[$type]) {
-      $notes += "- $entry"
+      [void]$notes.Add("- $entry")
     }
-    $notes += ""
+    [void]$notes.Add('')
   }
 }
 
 if (-not $hasContent) {
-  $notes += "_Nenhuma mudança individual listada nos commits._"
-  $notes += ""
+  [void]$notes.Add('_Nenhuma mudanca individual listada nos commits._')
+  [void]$notes.Add('')
 }
 
 $notesFile = Join-Path $root 'release-notes.md'
-Set-Content -Path $notesFile -Value $notes -Encoding utf8
+Set-Content -Path $notesFile -Value ($notes -join $nl) -Encoding utf8
 Write-Host "Release notes geradas: $notesFile" -ForegroundColor Green
 
 # atualiza CHANGELOG.md
 $changelog = Join-Path $root 'CHANGELOG.md'
 $existing = Get-Content -Path $changelog -Raw -Encoding utf8
 $date = Get-Date -Format 'yyyy-MM-dd'
-$newSection = "## [$version] - $date`r`n"
-$newSection += "`r`n"
+$newSection = [System.Collections.ArrayList]@()
+[void]$newSection.Add("## [$version] - $date")
+[void]$newSection.Add('')
 foreach ($type in $order) {
   if ($groups[$type].Count -gt 0) {
-    $newSection += "### $($labels[$type])`r`n`r`n"
+    [void]$newSection.Add("### $($labels[$type])")
+    [void]$newSection.Add('')
     foreach ($entry in $groups[$type]) {
-      $newSection += "- $entry`r`n"
+      [void]$newSection.Add("- $entry")
     }
-    $newSection += "`r`n"
+    [void]$newSection.Add('')
   }
 }
+$newSectionText = $newSection -join $nl
 
-$marker = '## [Não publicado]'
-if ($existing -match [regex]::Escape($marker)) {
-  $idx = $existing.IndexOf($marker)
-  $head = $existing.Substring(0, $idx)
-  $tail = $existing.Substring($idx)
-  $updated = $head + $newSection + $tail
+# idempotente: nao duplica a secao se ela ja existir
+if ($existing -match [regex]::Escape("## [$version] - ")) {
+  Write-Host "Secao [$version] ja existe no CHANGELOG; pulando atualizacao." -ForegroundColor Yellow
 } else {
-  $updated = $existing + $newSection
+  $marker = '## [Não publicado]'
+  if ($existing -match [regex]::Escape($marker)) {
+    $idx = $existing.IndexOf($marker)
+    $head = $existing.Substring(0, $idx)
+    $tail = $existing.Substring($idx)
+    $updated = $head + $newSectionText + $nl + $tail
+  } else {
+    $updated = $existing.TrimEnd("`r", "`n") + $nl + $nl + $newSectionText
+  }
+  Set-Content -Path $changelog -Value $updated -Encoding utf8
+  Write-Host 'CHANGELOG.md atualizado.' -ForegroundColor Green
 }
-
-Set-Content -Path $changelog -Value $updated -Encoding utf8
-Write-Host 'CHANGELOG.md atualizado.' -ForegroundColor Green

@@ -108,14 +108,24 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: powershell -ExecutionPolicy Bypass -File scripts/make-release-notes.ps1
 
-      - name: Commit updated changelog
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: 'chore(release): atualiza CHANGELOG para ${{ steps.version.outputs.version }}'
-          commit_user_name: 'github-actions[bot]'
-          commit_user_email: '41898282+github-actions[bot]@users.noreply.github.com'
-          file_pattern: CHANGELOG.md
-          skip_fetch: true
+      - name: Commit updated changelog to main
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          if (-not (Test-Path 'CHANGELOG.md')) { Write-Host 'Sem CHANGELOG'; exit 0 }
+          $sha = gh api "repos/$repo/contents/CHANGELOG.md" --jq .sha
+          if ($LASTEXITCODE -ne 0) { Write-Host 'Nao foi possivel ler CHANGELOG no main.'; exit 0 }
+          $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content 'CHANGELOG.md' -Raw)))
+          gh api "repos/$repo/contents/CHANGELOG.md" -X PUT `
+            -f "message=chore(release): atualiza CHANGELOG para $env:VERSION" `
+            -f "content=$content" `
+            -f "sha=$sha" `
+            -f branch=main
+          if ($LASTEXITCODE -ne 0) { Write-Host 'Falha ao commitar CHANGELOG no main.'; exit 1 }
+          Write-Host 'CHANGELOG.md atualizado no main.' -ForegroundColor Green
 
       - name: Publish release
         env:
