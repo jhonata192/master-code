@@ -1,0 +1,131 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/check-version.ps1
+          $version = $env:RELEASE_TAG.TrimStart('v')
+          Write-Host "version=$version"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$version"
+          $isPre = if ($version -match '-') { 'true' } else { 'false' }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "is_prerelease=$isPre"
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+      - name: Build standalone executable
+        run: npm run build:exe
+
+      - name: Install Inno Setup (if missing)
+        shell: pwsh
+        run: |
+          $iscc = @(
+            (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 7\ISCC.exe'),
+            'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 6\ISCC.exe',
+            'C:\Program Files\Inno Setup 7\ISCC.exe'
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            Write-Host 'Inno Setup nao encontrado. Instalando via choco...'
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          } else {
+            Write-Host "Inno Setup encontrado: $iscc"
+          }
+
+      - name: Build installer
+        run: npm run build:setup
+
+      - name: Generate checksums
+        shell: pwsh
+        run: |
+          $files = @('dist\master-code.exe', 'installer\master-code-setup.exe')
+          foreach ($f in $files) {
+            if (-not (Test-Path -LiteralPath $f)) {
+              Write-Host "Artefato ausente: $f" -ForegroundColor Red
+              exit 1
+            }
+          }
+          $sha = Get-FileHash -Path $files -Algorithm SHA256
+          $lines = foreach ($h in $sha) {
+            $name = Split-Path -Leaf $h.Path
+            "$($h.Hash.ToLower())  $name"
+          }
+          Set-Content -Path 'SHA256SUMS.txt' -Value $lines -Encoding ascii
+          Get-Content 'SHA256SUMS.txt'
+
+      - name: Verify checksums
+        shell: pwsh
+        run: |
+          Get-FileHash -Path 'dist\master-code.exe' -Algorithm SHA256 | ForEach-Object {
+            if ($_.Hash.ToLower() -eq (Get-Content 'SHA256SUMS.txt' | Select-String 'master-code.exe').Line.Split('  ')[0]) {
+              Write-Host 'master-code.exe OK' -ForegroundColor Green
+            } else { Write-Host 'FALHA master-code.exe' -ForegroundColor Red; exit 1 }
+          }
+          Get-FileHash -Path 'installer\master-code-setup.exe' -Algorithm SHA256 | ForEach-Object {
+            if ($_.Hash.ToLower() -eq (Get-Content 'SHA256SUMS.txt' | Select-String 'master-code-setup.exe').Line.Split('  ')[0]) {
+              Write-Host 'master-code-setup.exe OK' -ForegroundColor Green
+            } else { Write-Host 'FALHA master-code-setup.exe' -ForegroundColor Red; exit 1 }
+          }
+
+      - name: Generate release notes and update changelog
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: powershell -ExecutionPolicy Bypass -File scripts/make-release-notes.ps1
+
+      - name: Commit updated changelog
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore(release): atualiza CHANGELOG para ${{ steps.version.outputs.version }}'
+          commit_user_name: 'github-actions[bot]'
+          commit_user_email: '41898282+github-actions[bot]@users.noreply.github.com'
+          file_pattern: CHANGELOG.md
+          skip_fetch: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            dist/master-code.exe `
+            installer/master-code-setup.exe `
+            SHA256SUMS.txt `
+            --title "${{ github.ref_name }}" `
+            --notes-file release-notes.md `
+            --draft=$false `
+            --prerelease=${{ steps.version.outputs.is_prerelease }}
