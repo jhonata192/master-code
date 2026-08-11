@@ -29,3 +29,14 @@ Commits*).
 - Sistema de contexto inteligente (etapas 2 e 3): intenção, scoring por
   camadas, recuperação híbrida, grafo de relações entre arquivos, memória
   de decisões/erros/alterações e detecção de arquivos obsoletos.
+
+## [0.2.0] - 2026-08-11
+
+### Adicionado
+
+- update: sistema de atualizacao via GitHub Releases com release notes
+
+### Outros
+
+- release: atualiza CHANGELOG para 0.1.0
+
