@@ -115,6 +115,10 @@ export class ContextManager {
     return this.archive.length;
   }
 
+  get wouldCompact(): boolean {
+    return this.totalTokens > Math.floor(this.opts.windowTokens * this.opts.compactRatio);
+  }
+
   get decisionCount(): number {
     return this.decisions.size;
   }

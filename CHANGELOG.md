@@ -17,6 +17,24 @@ Commits*).
   contra a tag `vX.Y.Z` no workflow de release.
 - Script `scripts/make-release-notes.ps1` para gerar release notes e
   atualizar o CHANGELOG automaticamente.
+- Streaming de respostas do modelo em tempo real, com eventos estruturados
+  (`text_delta`, `tool_call_start`, `tool_call_args`, `tool_call_end`,
+  `tool_result`, `usage`, `retry`, `compaction`, entre outros).
+- Camada de eventos reutilizável (`EventBus`) que conecta o agente à
+  interface (renderer, trace e testes) sem acoplamento.
+- Fallback automático para resposta completa quando o provider não suporta
+  streaming, e retries visíveis em erros transitórios (429/5xx/network).
+- Modos de exibição do terminal: `--debug` (eventos estruturados com
+  timestamp), `--quiet` (apenas a resposta final) e `--debug-json`
+  (gravação dos eventos em JSONL).
+- Comandos `/trace` (rastreio de ferramentas da sessão) e `/tools`
+  (ferramentas disponíveis e uso).
+- Detecção de chamadas de ferramentas duplicadas na sessão (registro + aviso,
+  sem bloquear a execução).
+- Justificativa operacional de cada chamada de ferramenta derivada da etapa
+  do plano (sem expor chain-of-thought nem custo extra de tokens).
+- Testes de streaming e renderização (`tests/streaming.test.ts` e
+  `tests/render.test.ts`).
 
 ## [0.1.0] - 2026-08-10
 

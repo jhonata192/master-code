@@ -6,7 +6,13 @@ import chalk from 'chalk';
 import { askAutocomplete, inputClosed } from './autocomplete.js';
 import type { Suggestion } from './autocomplete.js';
 import { runTask, CancelledError } from './agent.js';
-import type { AgentEvent } from './agent.js';
+import { EventBus } from './events/bus.js';
+import { AgentRenderer, parseCliFlags } from './render.js';
+import type { RenderMode } from './render.js';
+import { TraceStore } from './events/trace.js';
+import { tools as allTools } from './tools.js';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import {
   loadConfig,
   setProvider,
@@ -36,6 +42,10 @@ const isTTY = stdout.isTTY === true;
 const updateService = new UpdateService();
 const MAX_NOTES_LINES = 40;
 
+const traceStore = new TraceStore();
+let renderMode: RenderMode = 'normal';
+let debugJsonPath: string | undefined;
+
 function renderBox(lines: string[]): string {
   const width = Math.max(...lines.map((l) => l.length)) + 2;
   const border = '┌' + '─'.repeat(width) + '┐';
@@ -63,14 +73,6 @@ function clearLine(): void {
   if (isTTY) {
     process.stdout.clearLine(0);
     process.stdout.cursorTo(0);
-  }
-}
-
-function renderEvent(e: AgentEvent): void {
-  if (e.type === 'tool') {
-    console.log(chalk.gray('  ' + e.content));
-  } else {
-    console.log(chalk.white(e.content));
   }
 }
 
@@ -133,20 +135,22 @@ async function handleTask(prompt: string): Promise<void> {
   };
 
   process.stdout.write(chalk.cyan('...'));
+  const bus = new EventBus();
+  traceStore.attach(bus);
+  const renderer = new AgentRenderer(bus, { mode: renderMode, debugJsonPath });
+  void renderer;
   try {
-    const result = await runTask(
-      prompt,
-      (e) => {
-        clearLine();
-        renderEvent(e);
-      },
-      controller.signal,
-      confirm
-    );
+    const result = await runTask(prompt, {
+      bus,
+      signal: controller.signal,
+      confirm,
+    });
     clearLine();
-    console.log(chalk.gray('  modelo: ' + result.modelUsed));
-    console.log(chalk.bold('\n[Done]'));
-    if (!result.text) console.log(chalk.gray('(sem texto de resposta)'));
+    if (renderMode !== 'quiet') {
+      console.log(chalk.gray('  modelo: ' + result.modelUsed));
+      console.log(chalk.bold('\n[Done]'));
+      if (!result.text) console.log(chalk.gray('(sem texto de resposta)'));
+    }
   } catch (err) {
     clearLine();
     if (err instanceof CancelledError) {
@@ -236,7 +240,27 @@ async function cmdLimpar(): Promise<void> {
   const ctx = await getContextManager();
   await ctx.reset();
   resetContextManager();
+  traceStore.reset();
   console.log(chalk.green('Contexto limpo (sessao reiniciada).'));
+}
+
+function cmdTrace(): void {
+  console.log(traceStore.render());
+}
+
+function cmdTools(): void {
+  const counts = traceStore.countByTool();
+  console.log(chalk.bold('Ferramentas (' + allTools.length + ')'));
+  for (const t of allTools) {
+    const fn = t.function;
+    const used = counts.get(fn.name) ?? 0;
+    const desc = (fn.description ?? '').split('\n')[0];
+    console.log(
+      '  ' + chalk.cyan(fn.name.padEnd(16)) +
+      (used > 0 ? chalk.gray(String(used) + 'x  ') : chalk.gray('    ')) +
+      chalk.gray(desc.slice(0, 80))
+    );
+  }
 }
 
 async function cmdProvider(): Promise<void> {
@@ -358,6 +382,8 @@ function printHelp(): void {
   console.log('  /contexto  Mostrar o estado do contexto da sessao');
   console.log('  /memoria   Listar a memoria persistente do projeto');
   console.log('  /limpar    Limpar o contexto e comecar sessao nova');
+  console.log('  /trace     Mostrar o rastreio das ferramentas da sessao');
+  console.log('  /tools     Listar ferramentas disponiveis e uso na sessao');
   console.log('  /version   Mostrar versao, canal e status de atualizacao');
   console.log('  /update    Verificar e instalar a ultima versao do GitHub');
   console.log('  /update check   Verificar se ha atualizacao disponivel');
@@ -587,6 +613,12 @@ async function handleSlash(raw: string): Promise<void> {
     case '/limpar':
       await cmdLimpar();
       break;
+    case '/trace':
+      cmdTrace();
+      break;
+    case '/tools':
+      cmdTools();
+      break;
     case '/version':
       await cmdVersion();
       break;
@@ -621,6 +653,8 @@ const COMMANDS: string[] = [
   '/contexto',
   '/memoria',
   '/limpar',
+  '/trace',
+  '/tools',
   '/version',
   '/update',
   '/update check',
@@ -668,7 +702,7 @@ async function runAutoUpdateCheck(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+  const rawArgv = process.argv.slice(2);
   if (isUpdaterInvocation(process.argv)) {
     const args = parseUpdaterArgs(process.argv);
     if (args) {
@@ -678,7 +712,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const oneShot = argv.join(' ');
+  const flags = parseCliFlags(rawArgv);
+  renderMode = flags.mode;
+  debugJsonPath = flags.debugJsonPath;
+  if (debugJsonPath) {
+    await mkdir(path.dirname(debugJsonPath), { recursive: true });
+    console.log(chalk.gray('  eventos JSONL: ' + debugJsonPath));
+  }
+
+  const oneShot = flags.args.join(' ');
   if (oneShot) {
     await handleTask(oneShot);
     return;
@@ -690,7 +732,7 @@ async function main(): Promise<void> {
     chalk.gray('Modelo: ' + describeModel(c) + '  |  API key: ' + maskKey(c.provider.apiKey))
   );
   console.log(
-    chalk.gray('Versao ' + getCurrentVersion() + '  |  Comandos: /provider /model /status /version /update /help | sair para sair')
+    chalk.gray('Versao ' + getCurrentVersion() + '  |  Comandos: /provider /model /status /version /update /trace /tools /help | sair para sair' + (renderMode !== 'normal' ? '  |  modo: ' + renderMode : ''))
   );
   console.log('');
 

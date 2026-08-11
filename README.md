@@ -100,6 +100,22 @@ inicialização, com timeout curto, e não bloqueia o uso do agente.
 /update notes --full  Mostra as notas completas (sem truncar)
 /update open       Abre a página da Release no navegador padrão
 /update status     Estado detalhado do updater
+/trace             Mostra o rastreio das ferramentas da sessao (chamadas, uso, duplicadas)
+/tools             Lista as ferramentas disponiveis e quantas vezes foram usadas na sessao
+```
+
+### Streaming e observabilidade
+
+A execucao do agente e transmitida em tempo real para o terminal por meio de
+eventos estruturados (`text_delta`, `tool_call_start`, `tool_call_args`,
+`tool_result`, `usage`, `compaction`, etc.). As respostas do modelo chegam em
+fluxo (streaming) e, se o provider nao suportar streaming, o agente usa
+automaticamente a resposta completa como fallback.
+
+```
+--debug        Mostra eventos estruturados com timestamp (args, ids, usage, contexto)
+--quiet        Mostra somente a resposta final
+--debug-json   Grava todos os eventos em um arquivo JSONL (~/.master-code/traces/ ou caminho informado)
 ```
 
 ### Como funciona
