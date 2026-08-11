@@ -11,7 +11,7 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Write-Host '==> 2/4 Empacotando com esbuild...'
 New-Item -ItemType Directory -Force -Path 'dist-bundle' | Out-Null
-npx esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist-bundle/master-code.cjs
+node scripts/bundle.mjs
 if ($LASTEXITCODE -ne 0) { exit 1 }
 
 Write-Host '==> 3/4 Gerando blob SEA...'

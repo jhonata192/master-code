@@ -17,8 +17,47 @@ import {
 } from './config.js';
 import { listModels, listCodingModels } from './llm.js';
 import { getContextManager, resetContextManager } from './session.js';
+import {
+  UpdateService,
+  getCurrentVersion,
+  isUpdaterInvocation,
+  parseUpdaterArgs,
+  runUpdater,
+  renderMarkdown,
+  summarizeNotes,
+  truncateNotesLines,
+  openUrlInBrowser,
+} from './update/index.js';
+import type { NotesEntry, UpdateStatus } from './update/index.js';
+import { appendLog } from './update/index.js';
 
 const isTTY = stdout.isTTY === true;
+
+const updateService = new UpdateService();
+const MAX_NOTES_LINES = 40;
+
+function renderBox(lines: string[]): string {
+  const width = Math.max(...lines.map((l) => l.length)) + 2;
+  const border = '┌' + '─'.repeat(width) + '┐';
+  const body = lines.map((l) => '│ ' + l.padEnd(width - 1) + '│');
+  const bottom = '└' + '─'.repeat(width) + '┘';
+  return [border, ...body, bottom].join('\n');
+}
+
+function fmtBytes(n: number): string {
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GB';
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(2) + ' MB';
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(2) + ' KB';
+  return n + ' B';
+}
+
+function fmtProgress(p: { received: number; total: number }): string {
+  if (p.total > 0) {
+    const pct = Math.floor((p.received / p.total) * 100);
+    return `${pct}% (${fmtBytes(p.received)} / ${fmtBytes(p.total)})`;
+  }
+  return fmtBytes(p.received);
+}
 
 function clearLine(): void {
   if (isTTY) {
@@ -319,6 +358,14 @@ function printHelp(): void {
   console.log('  /contexto  Mostrar o estado do contexto da sessao');
   console.log('  /memoria   Listar a memoria persistente do projeto');
   console.log('  /limpar    Limpar o contexto e comecar sessao nova');
+  console.log('  /version   Mostrar versao, canal e status de atualizacao');
+  console.log('  /update    Verificar e instalar a ultima versao do GitHub');
+  console.log('  /update check   Verificar se ha atualizacao disponivel');
+  console.log('  /update download  Baixar a atualizacao (sem instalar)');
+  console.log('  /update install   Instalar a atualizacao baixada');
+  console.log('  /update notes     Mostrar as Release Notes (--full p/ tudo, ou /update notes 0.2.0)');
+  console.log('  /update open      Abrir a Release no navegador');
+  console.log('  /update status    Mostrar estado detalhado do updater');
   console.log('  /help      Mostrar estes comandos');
   console.log('  sair | exit | :q');
   console.log('  Qualquer outro texto vira um pedido para o agente.');
@@ -328,8 +375,199 @@ function printHelp(): void {
   console.log('  Ctrl+U limpa, Ctrl+C sai.');
 }
 
+async function cmdVersion(): Promise<void> {
+  const c = await loadConfig();
+  console.log(chalk.bold('Master-Code'));
+  console.log('  Version: ' + chalk.gray(getCurrentVersion()));
+  console.log('  Channel: ' + chalk.gray(c.update.channel));
+  const st = await updateService.status();
+  console.log(
+    st.updateAvailable && st.lastKnownVersion
+      ? '  Update:  ' + chalk.green('available (' + st.lastKnownVersion + ')')
+      : '  Update:  ' + chalk.gray('up to date')
+  );
+}
+
+async function cmdUpdateCheck(): Promise<void> {
+  console.log(chalk.cyan('Verificando atualizacoes no GitHub...'));
+  const res = await updateService.check(true);
+  if (!res.ok) {
+    console.log(chalk.red('Erro: ' + (res.error ?? 'falha desconhecida')));
+    return;
+  }
+  console.log('  Versao atual:  ' + chalk.gray(res.currentVersion));
+  if (!res.latestVersion) {
+    console.log(chalk.gray('  Nenhuma versao publicada no GitHub.'));
+    return;
+  }
+  console.log('  Ultima versao: ' + chalk.gray(res.latestVersion));
+  if (res.updateAvailable) {
+    console.log(chalk.green('\n  Nova versao disponivel.'));
+    const notes = await updateService.getReleaseNotes();
+    if (notes.ok && notes.entry?.body) {
+      const items = summarizeNotes(notes.entry.body, 8);
+      if (items.length) {
+        console.log(chalk.bold('\n  Principais alteracoes:'));
+        for (const it of items) console.log('    * ' + it);
+      }
+    }
+    console.log(chalk.gray('\n  Use /update para atualizar.'));
+    console.log(chalk.gray('  Use /update notes para ver as notas completas.'));
+  } else {
+    console.log(chalk.green('\n  Voce esta atualizado.'));
+  }
+}
+
+function showReleaseInfo(entry: NotesEntry, full = false): void {
+  console.log(chalk.bold('\n  Nova versao disponivel: ' + entry.version));
+  console.log('  Release: ' + chalk.gray(entry.tagName));
+  if (entry.publishedAt) {
+    const d = new Date(entry.publishedAt);
+    if (!Number.isNaN(d.getTime())) console.log('  Data:    ' + chalk.gray(d.toLocaleDateString('pt-BR')));
+  }
+  if (entry.htmlUrl) console.log('  Ver no GitHub: ' + chalk.gray(entry.htmlUrl));
+
+  if (!entry.body || !entry.body.trim()) {
+    console.log(chalk.gray('\n  (Release sem notas publicadas.)'));
+    return;
+  }
+  console.log(chalk.bold('\n  Notas da atualizacao:'));
+  const rendered = renderMarkdown(entry.body);
+  if (full) {
+    console.log(rendered);
+    return;
+  }
+  const { lines, truncated, remaining } = truncateNotesLines(rendered, MAX_NOTES_LINES);
+  console.log(lines.join('\n'));
+  if (truncated) {
+    console.log(chalk.gray(`\n  ... mais ${remaining} linhas. Use /update notes --full para ver tudo.`));
+  }
+}
+
+async function cmdUpdateNotes(opts: { version?: string; full: boolean }): Promise<void> {
+  const res = await updateService.getReleaseNotes({ version: opts.version });
+  if (!res.ok) {
+    console.log(chalk.red(res.error ?? 'Erro ao obter as notas.'));
+    return;
+  }
+  const entry = res.entry!;
+  if (res.fromCache) console.log(chalk.gray('  (notas em cache)'));
+  showReleaseInfo(entry, opts.full);
+}
+
+async function cmdUpdateOpen(): Promise<void> {
+  const notes = await updateService.getReleaseNotes();
+  if (!notes.ok || !notes.entry?.htmlUrl) {
+    console.log(chalk.red(notes.error ?? 'Nao ha release para abrir.'));
+    return;
+  }
+  console.log(chalk.gray('Abrindo no navegador: ' + notes.entry.htmlUrl));
+  const ok = openUrlInBrowser(notes.entry.htmlUrl);
+  if (!ok) console.log(chalk.yellow('  Nao foi possivel abrir o navegador automaticamente.'));
+}
+
+async function cmdUpdate(): Promise<void> {
+  console.log(chalk.cyan('Verificando atualizacoes no GitHub...'));
+  const res = await updateService.check(true);
+  if (!res.ok) {
+    console.log(chalk.red('Erro: ' + (res.error ?? 'falha desconhecida')));
+    return;
+  }
+  console.log('  Versao atual:  ' + chalk.gray(res.currentVersion));
+  if (!res.latestVersion) {
+    console.log(chalk.gray('  Nenhuma versao publicada no GitHub.'));
+    return;
+  }
+  console.log('  Nova versao:   ' + chalk.gray(res.latestVersion));
+  if (!res.updateAvailable) {
+    console.log(chalk.green('  Voce esta atualizado.'));
+    return;
+  }
+
+  const notes = await updateService.getReleaseNotes();
+  if (notes.ok && notes.entry) {
+    showReleaseInfo(notes.entry, false);
+  }
+
+  const yes = await askAutocomplete(chalk.yellow('\n  Deseja atualizar? [S] Sim / [N] Nao: '), () => []);
+  if (!/^\s*(s|sim|y|yes)\s*$/i.test(yes)) {
+    console.log(chalk.gray('  Atualizacao cancelada.'));
+    return;
+  }
+  await cmdUpdateDownload();
+  const inst = await updateService.status();
+  if (inst.downloaded) {
+    await cmdUpdateInstall();
+  }
+}
+
+async function cmdUpdateDownload(): Promise<void> {
+  console.log(chalk.cyan('Baixando atualizacao...'));
+  let last: { received: number; total: number } = { received: 0, total: 0 };
+  const res = await updateService.download({
+    onProgress: (p) => {
+      last = p;
+      clearLine();
+      process.stdout.write(chalk.gray('  Progresso: ' + fmtProgress(p)));
+    },
+  });
+  clearLine();
+  if (!res.ok) {
+    console.log(chalk.red('Falha ao baixar: ' + (res.error ?? 'erro desconhecido')));
+    return;
+  }
+  console.log(chalk.green('Download concluido.'));
+  console.log('  Versao:  ' + chalk.gray(res.version ?? '-'));
+  console.log('  Arquivo: ' + chalk.gray(res.fileName ?? '-'));
+  console.log('  Tamanho: ' + chalk.gray(fmtBytes(res.size)));
+  console.log('  Destino: ' + chalk.gray(res.filePath ?? '-'));
+  console.log(
+    res.checksum
+      ? '  SHA-256: ' + chalk.gray(res.checksum.slice(0, 16) + '...')
+      : chalk.yellow('  SHA-256: nao verificado (checksum ausente na release)')
+  );
+  console.log(chalk.gray('  Use /update install para instalar.'));
+}
+
+async function cmdUpdateInstall(): Promise<void> {
+  const res = await updateService.install();
+  if (!res.ok) {
+    console.log(chalk.red('Nao foi possivel instalar: ' + (res.error ?? 'erro desconhecido')));
+    return;
+  }
+  console.log(chalk.green('Atualizacao em andamento.'));
+  console.log(chalk.gray('O updater vai fechar esta instancia, instalar a nova versao e reabrir.'));
+  await appendLog('install', { state: 'closing-app' });
+  setTimeout(() => process.exit(0), 500);
+}
+
+async function cmdUpdateStatus(): Promise<void> {
+  const st: UpdateStatus = await updateService.status();
+  console.log(chalk.bold('Update status'));
+  console.log('  Versao atual:        ' + chalk.gray(st.currentVersion));
+  console.log('  Canal:               ' + chalk.gray(st.channel));
+  console.log('  Habilitado:          ' + chalk.gray(String(st.enabled)));
+  console.log('  Auto-check:          ' + chalk.gray(String(st.autoCheck)));
+  console.log('  Auto-update:         ' + chalk.gray(String(st.autoUpdate)));
+  console.log(
+    '  Ultima verificacao:  ' + chalk.gray(st.lastUpdateCheck ? new Date(st.lastUpdateCheck).toLocaleString() : 'nunca')
+  );
+  console.log('  Ultima versao:       ' + chalk.gray(st.lastKnownVersion ?? 'nenhuma'));
+  console.log(
+    '  Atualizacao:         ' +
+      (st.updateAvailable ? chalk.green('disponivel (' + st.lastKnownVersion + ')') : chalk.gray('atualizado'))
+  );
+  if (st.downloaded) {
+    console.log('  Download:            ' + chalk.gray(st.downloaded.fileName));
+    console.log('  Download path:       ' + chalk.gray(st.downloaded.path));
+  } else {
+    console.log('  Download:            ' + chalk.gray('nenhum'));
+  }
+}
+
 async function handleSlash(raw: string): Promise<void> {
-  const [cmd] = raw.trim().split(/\s+/);
+  const [cmd, ...rest] = raw.trim().split(/\s+/);
+  const sub = rest.join(' ').trim();
   switch (cmd) {
     case '/provider':
       await cmdProvider();
@@ -349,6 +587,25 @@ async function handleSlash(raw: string): Promise<void> {
     case '/limpar':
       await cmdLimpar();
       break;
+    case '/version':
+      await cmdVersion();
+      break;
+    case '/update': {
+      if (sub === 'check') await cmdUpdateCheck();
+      else if (sub === 'download') await cmdUpdateDownload();
+      else if (sub === 'install') await cmdUpdateInstall();
+      else if (sub === 'status') await cmdUpdateStatus();
+      else if (sub === 'open') await cmdUpdateOpen();
+      else if (sub === 'notes') await cmdUpdateNotes({ full: false });
+      else if (sub.startsWith('notes ')) {
+        const restArgs = sub.slice(6).trim().split(/\s+/);
+        const full = restArgs.includes('--full');
+        const version = restArgs.filter((a) => a !== '--full').join(' ').trim() || undefined;
+        await cmdUpdateNotes({ version, full });
+      } else if (sub === '') await cmdUpdate();
+      else console.log(chalk.gray('Uso: /update [check|download|install|status|notes [versao] [--full]|open]'));
+      break;
+    }
     case '/help':
       printHelp();
       break;
@@ -357,7 +614,25 @@ async function handleSlash(raw: string): Promise<void> {
   }
 }
 
-const COMMANDS: string[] = ['/provider', '/model', '/status', '/contexto', '/memoria', '/limpar', '/help', 'sair', 'exit'];
+const COMMANDS: string[] = [
+  '/provider',
+  '/model',
+  '/status',
+  '/contexto',
+  '/memoria',
+  '/limpar',
+  '/version',
+  '/update',
+  '/update check',
+  '/update download',
+  '/update install',
+  '/update notes',
+  '/update open',
+  '/update status',
+  '/help',
+  'sair',
+  'exit',
+];
 
 function suggestCommands(buf: string): Suggestion[] {
   const b = buf.trim().toLowerCase();
@@ -368,8 +643,42 @@ function suggestCommands(buf: string): Suggestion[] {
   }));
 }
 
+async function runAutoUpdateCheck(): Promise<void> {
+  const c = await loadConfig();
+  if (!c.update.autoCheck || !c.update.enabled) return;
+  try {
+    const res = await updateService.check(false);
+    if (res.updateAvailable && res.latestVersion) {
+      console.log('');
+      console.log(
+        renderBox([
+          chalk.bold('Nova versao disponivel'),
+          '',
+          '  Atual: ' + res.currentVersion,
+          '  Nova:  ' + res.latestVersion,
+          '',
+          chalk.gray('Use /update para ver as novidades.'),
+        ])
+      );
+      console.log('');
+    }
+  } catch {
+    /* offline/lento: ignorar silenciosamente */
+  }
+}
+
 async function main(): Promise<void> {
-  const oneShot = process.argv.slice(2).join(' ');
+  const argv = process.argv.slice(2);
+  if (isUpdaterInvocation(process.argv)) {
+    const args = parseUpdaterArgs(process.argv);
+    if (args) {
+      const code = await runUpdater(args);
+      process.exit(code);
+    }
+    process.exit(1);
+  }
+
+  const oneShot = argv.join(' ');
   if (oneShot) {
     await handleTask(oneShot);
     return;
@@ -380,8 +689,12 @@ async function main(): Promise<void> {
   console.log(
     chalk.gray('Modelo: ' + describeModel(c) + '  |  API key: ' + maskKey(c.provider.apiKey))
   );
-  console.log(chalk.gray('Comandos: /provider /model /status /help | sair para sair'));
+  console.log(
+    chalk.gray('Versao ' + getCurrentVersion() + '  |  Comandos: /provider /model /status /version /update /help | sair para sair')
+  );
   console.log('');
+
+  void runAutoUpdateCheck();
 
   try {
     for (;;) {

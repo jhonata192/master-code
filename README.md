@@ -80,6 +80,60 @@ npm run install:exe
 npm run uninstall:exe
 ```
 
+## Atualização
+
+O `master-code` verifica automaticamente por novas versões no GitHub Releases
+do repositório `jhonata192/master-code` (canal `stable`, sem pré-releases).
+O comportamento é offline-first: a verificação acontece em background na
+inicialização, com timeout curto, e não bloqueia o uso do agente.
+
+### Comandos
+
+```
+/version           Versão atual, canal e se há atualização
+/update            Verifica e, se confirmar, baixa e instala a última versão
+/update check      Verifica se há atualização disponível (com resumo das novidades)
+/update download   Baixa a atualização (sem instalar)
+/update install    Instala a atualização já baixada
+/update notes      Mostra as Release Notes da última versão (respeita o canal)
+/update notes 0.2.0   Mostra as Release Notes daquela versão
+/update notes --full  Mostra as notas completas (sem truncar)
+/update open       Abre a página da Release no navegador padrão
+/update status     Estado detalhado do updater
+```
+
+### Como funciona
+
+1. **Verificação**: compara a versão local (do `package.json`, embutida no
+   executável) com a última release estável do GitHub usando semver. O
+   resultado fica em cache por 24h em `~/.master-code/config.json`.
+2. **Release Notes**: o `body` da GitHub Release é usado como as notas
+   oficiais da atualização. Na verificação, as notas são armazenadas em cache
+   em `~/.master-code/release-notes.json` (versão, release ID, corpo, data de
+   publicação e timestamp da consulta). O cache expira em 24h e é invalidado
+   quando a Release muda; nenhuma chamada ao GitHub é feita para notas que já
+   estão em cache.
+3. **Exibição**: as notas são renderizadas como Markdown no terminal
+   (títulos, listas, negrito, código, links, citações). Notas muito grandes
+   são truncadas por padrão (`/update notes --full` mostra tudo) e `/update`
+   apresenta um resumo das principais alterações antes de pedir confirmação.
+4. **Download**: baixa `master-code-setup-<versão>.exe` e valida o SHA-256
+   contra o `SHA256SUMS.txt` da release. Sem checksum na release, o download
+   é abortado com aviso de integridade.
+5. **Instalação**: copia o executável atual para `master-code-updater.exe`
+   (processo auxiliar em `%TEMP%`), fecha o `master-code`, roda o instalador
+   em modo silencioso (`/VERYSILENT /NORESTART`) e reabre o aplicativo.
+
+O processo de atualização usa apenas o repositório configurado; nada é
+executado de URLs arbitrárias. Configurações, sessões e memória em
+`~/.master-code/` são preservadas. Logs de atualização ficam em
+`~/.master-code/update.log`.
+
+> **Nota**: a instalação automática exige o `master-code.exe` instalado
+> (via instalador ou `npm run install:exe`). Rodando apenas a partir do
+> código-fonte (`node dist/index.js`), use `/update download` para baixar e
+> instale manualmente.
+
 ## Release
 
 O processo de release é gerenciado por GitHub Actions:

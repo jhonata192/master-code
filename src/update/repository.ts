@@ -1,0 +1,4 @@
+export const UPDATE_REPOSITORY_OWNER = 'jhonata192';
+export const UPDATE_REPOSITORY_NAME = 'master-code';
+
+export const UPDATE_REPOSITORY = `${UPDATE_REPOSITORY_OWNER}/${UPDATE_REPOSITORY_NAME}`;
