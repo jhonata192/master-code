@@ -9,7 +9,7 @@ Este arquivo é atualizado automaticamente pelo workflow de release
 (`.github/workflows/release.yml`) a partir dos commits (*Conventional
 Commits*).
 
-## [Não publicado]
+## [0.3.0] - 2026-08-11
 
 ### Adicionado
 - Pipeline de CI/CD com GitHub Actions (`ci.yml` e `release.yml`).
@@ -35,6 +35,16 @@ Commits*).
   do plano (sem expor chain-of-thought nem custo extra de tokens).
 - Testes de streaming e renderização (`tests/streaming.test.ts` e
   `tests/render.test.ts`).
+
+### Corrigido
+- Instalador notifica o Windows (`WM_SETTINGCHANGE`) após alterar o PATH do
+  sistema, para que novos terminais enxerguem o `master-code` imediatamente
+  após a instalação (sem precisar de logout/reinício).
+- Instalador normaliza a comparação das entradas do PATH (case-insensitive,
+  barra final, espaços) e evita duplicações em reinstalações/atualizações.
+- Instalador valida a instalação (diretório, executável, PATH, duplicatas)
+  com erros claros no log; o desinstalador remove somente a entrada do
+  master-code, preservando as demais aplicações.
 
 ## [0.1.0] - 2026-08-10
 
