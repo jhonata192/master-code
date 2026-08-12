@@ -29,6 +29,7 @@ export async function getContextManager(): Promise<ContextManager> {
   const c = await loadConfig();
   const root = process.cwd();
   const windowTokens = c.contextWindow ?? 16000;
+  const defaultMode = c.agent?.defaultMode ?? 'build';
 
   manager = new ContextManager({
     sessionId: sessionIdFor(root),
@@ -41,6 +42,7 @@ export async function getContextManager(): Promise<ContextManager> {
     projectRoot: root,
     windowTokens,
     compactRatio: 0.75,
+    mode: defaultMode,
   });
 
   await manager.load();

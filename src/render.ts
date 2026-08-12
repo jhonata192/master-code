@@ -164,6 +164,20 @@ export class AgentRenderer {
         this.endDelta();
         console.log(chalk.gray('[agent] ' + e.message));
         break;
+      case 'mode_change':
+        this.endDelta();
+        console.log(chalk.magenta('[mode] ' + e.from + ' -> ' + e.to));
+        break;
+      case 'tool_gate':
+        this.endDelta();
+        if (e.allowed) {
+          console.log(chalk.gray('[tool-gate] mode=' + e.mode + ' tool=' + e.tool + ' allowed=true'));
+        } else {
+          console.log(
+            chalk.yellow('[tool-gate] mode=' + e.mode + ' tool=' + e.tool + ' allowed=false' + (e.reason ? ' reason=' + e.reason : ''))
+          );
+        }
+        break;
       default:
         break;
     }

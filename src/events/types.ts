@@ -45,4 +45,6 @@ export type AgentEvent =
   | { type: 'usage'; model: string; usage: UsageInfo }
   | { type: 'compaction'; state: 'start' | 'done'; before: number; after?: number }
   | { type: 'context_update'; entries: number; tokens: number; changes: number }
-  | { type: 'agent'; message: string };
+  | { type: 'agent'; message: string }
+  | { type: 'mode_change'; from: string; to: string }
+  | { type: 'tool_gate'; mode: string; tool: string; allowed: boolean; reason?: string };

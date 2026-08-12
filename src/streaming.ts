@@ -24,6 +24,89 @@ export interface StreamParams {
 
 const MAX_ATTEMPTS = 3;
 
+/**
+ * Penalidades de repeticao para reduzir degeneracao do modelo
+ * (loops tipo "tambem tambem tambem..." / "JAMAIS JAMAIS JAMAIS...").
+ * Sao aplicadas por padrao e removidas automaticamente caso o provider
+ * rejeite o parametro (HTTP 400).
+ */
+const REPETITION = {
+  frequency_penalty: 0.6,
+  presence_penalty: 0.5,
+} as const;
+
+const THINK_OPEN = '<think>';
+const THINK_CLOSE = '</think>';
+
+/**
+ * Remove blocos de raciocinio `<think>...</think>` do texto, inclusive
+ * quando quebrados entre chunks de streaming. Nao emite nada do conteudo
+ * interno do raciocinio.
+ */
+export class ThinkFilter {
+  private buffer = '';
+  private inThink = false;
+
+  push(delta: string): string {
+    this.buffer += delta;
+    let out = '';
+    for (;;) {
+      if (this.inThink) {
+        const closeIdx = this.buffer.indexOf(THINK_CLOSE);
+        if (closeIdx === -1) {
+          const keepFrom = Math.max(0, this.buffer.length - (THINK_CLOSE.length - 1));
+          this.buffer = this.buffer.slice(keepFrom);
+          break;
+        }
+        this.buffer = this.buffer.slice(closeIdx + THINK_CLOSE.length);
+        this.inThink = false;
+        continue;
+      }
+      const openIdx = this.buffer.indexOf(THINK_OPEN);
+      if (openIdx === -1) {
+        const keepFrom = Math.max(0, this.buffer.length - (THINK_OPEN.length - 1));
+        out += this.buffer.slice(0, keepFrom);
+        this.buffer = this.buffer.slice(keepFrom);
+        break;
+      }
+      out += this.buffer.slice(0, openIdx);
+      this.buffer = this.buffer.slice(openIdx + THINK_OPEN.length);
+      this.inThink = true;
+    }
+    return out;
+  }
+
+  flush(): string {
+    if (this.inThink) {
+      this.buffer = '';
+      return '';
+    }
+    const out = this.buffer;
+    this.buffer = '';
+    return out;
+  }
+}
+
+export function stripThink(text: string): string {
+  const out: string[] = [];
+  let rest = text;
+  for (;;) {
+    const openIdx = rest.indexOf(THINK_OPEN);
+    if (openIdx === -1) {
+      out.push(rest);
+      break;
+    }
+    out.push(rest.slice(0, openIdx));
+    const after = rest.slice(openIdx + THINK_OPEN.length);
+    const closeIdx = after.indexOf(THINK_CLOSE);
+    if (closeIdx === -1) {
+      break;
+    }
+    rest = after.slice(closeIdx + THINK_CLOSE.length);
+  }
+  return out.join('');
+}
+
 function isRetryable(err: unknown): boolean {
   const e = err as { status?: number; code?: string; message?: string };
   if (e.status && (e.status === 429 || e.status >= 500)) return true;
@@ -53,27 +136,62 @@ export async function streamCompletion(
   cbs: StreamCallbacks,
   signal?: AbortSignal
 ): Promise<void> {
-  const base = {
-    model: params.model,
-    messages: params.messages,
-    tools: params.tools,
-    tool_choice: 'auto' as const,
-  };
-
+  const filter = new ThinkFilter();
   let anyChunk = false;
   let useStreamOptions = true;
+  let usePenalties = true;
+
+  const buildBody = (
+    stream: boolean,
+    includeUsage: boolean
+  ): {
+    model: string;
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+    tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+    tool_choice: 'auto';
+    stream: boolean;
+    stream_options?: { include_usage: boolean };
+    frequency_penalty?: number;
+    presence_penalty?: number;
+  } => {
+    const body: {
+      model: string;
+      messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+      tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+      tool_choice: 'auto';
+      stream: boolean;
+      stream_options?: { include_usage: boolean };
+      frequency_penalty?: number;
+      presence_penalty?: number;
+    } = {
+      model: params.model,
+      messages: params.messages as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+      tools: params.tools,
+      tool_choice: 'auto',
+      stream,
+    };
+    if (includeUsage && stream) body.stream_options = { include_usage: true };
+    if (usePenalties) {
+      body.frequency_penalty = REPETITION.frequency_penalty;
+      body.presence_penalty = REPETITION.presence_penalty;
+    }
+    return body;
+  };
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const body: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = useStreamOptions
-        ? { ...base, stream: true, stream_options: { include_usage: true } }
-        : { ...base, stream: true };
+      const body = useStreamOptions
+        ? (buildBody(true, true) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming)
+        : (buildBody(true, false) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming);
       const stream = await client.chat.completions.create(body, { signal, maxRetries: 0 });
       for await (const chunk of stream) {
         anyChunk = true;
         const choice = chunk.choices?.[0];
         const delta = choice?.delta;
-        if (delta?.content) cbs.onText?.(delta.content);
+        if (delta?.content) {
+          const text = filter.push(delta.content);
+          if (text) cbs.onText?.(text);
+        }
         for (const tc of delta?.tool_calls ?? []) {
           if (tc.id || tc.function?.name) {
             cbs.onToolStart?.(tc.index, tc.id, tc.function?.name);
@@ -89,6 +207,8 @@ export async function streamCompletion(
           });
         }
       }
+      const tail = filter.flush();
+      if (tail) cbs.onText?.(tail);
       return;
     } catch (err) {
       if (signal?.aborted) throw err;
@@ -96,6 +216,10 @@ export async function streamCompletion(
       if (anyChunk) throw err;
       if (useStreamOptions && e.status === 400) {
         useStreamOptions = false;
+        continue;
+      }
+      if (usePenalties && e.status === 400) {
+        usePenalties = false;
         continue;
       }
       if (attempt < MAX_ATTEMPTS && isRetryable(err)) {
@@ -107,12 +231,14 @@ export async function streamCompletion(
   }
 
   const res = await client.chat.completions.create(
-    { ...base, stream: false as const },
+    buildBody(false, false) as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
     { signal }
-  );
-  const msg = res.choices?.[0]?.message;
+  );  const msg = res.choices?.[0]?.message;
   if (!msg) throw new Error('Resposta vazia da API');
-  if (msg.content) cbs.onText?.(msg.content);
+  if (msg.content) {
+    const text = stripThink(msg.content);
+    if (text) cbs.onText?.(text);
+  }
   const tcs = msg.tool_calls ?? [];
   tcs.forEach((tc, i) => {
     cbs.onToolStart?.(i, tc.id, tc.function?.name);

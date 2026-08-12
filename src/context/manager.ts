@@ -2,6 +2,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   ArchiveRecord,
+  AgentMode,
   ContextEntry,
   ContextManagerOptions,
   ContinuityState,
@@ -37,6 +38,7 @@ import { ErrorMemory } from './errorMemory.js';
 import { ChangeMemory } from './changeMemory.js';
 import { ObsoleteDetector } from './obsolete.js';
 import { LAYER_3_RELEVANT, LAYER_4_HISTORY } from './layers.js';
+import { modeSystemPrompt } from '../modes.js';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'coverage', '.next', '.nuxt', 'out']);
 
@@ -66,6 +68,7 @@ export class ContextManager {
   objective: string | null = null;
   taskState: TaskState | null = null;
   continuity: ContinuityState | null = null;
+  mode: AgentMode;
   memory = new ProjectMemory();
   decisions = new DecisionMemory();
   errors = new ErrorMemory();
@@ -85,6 +88,7 @@ export class ContextManager {
   constructor(private opts: ContextManagerOptions) {
     this.createdAt = Date.now();
     this.updatedAt = Date.now();
+    this.mode = opts.mode ?? 'build';
     this.semanticRetriever = opts.semanticRetriever ?? new KeywordSemanticRetriever();
     this.hybridRetriever = opts.hybridRetriever ?? new HybridRetriever();
     this.fileRelations = new FileRelationsIndex(opts.projectRoot);
@@ -97,6 +101,11 @@ export class ContextManager {
 
   get windowTokens(): number {
     return this.opts.windowTokens;
+  }
+
+  setMode(mode: AgentMode): void {
+    this.mode = mode;
+    this.updatedAt = Date.now();
   }
 
   get tokenCounter() {
@@ -378,6 +387,7 @@ export class ContextManager {
 
     const q = query ?? '';
     const intent = detectIntent(q || this.objective || '');
+    const isCasual = intent.intent === 'casual' || intent.intent === 'question';
     const activeFiles = this.activeFiles();
 
     await this.refreshRelatedFiles(activeFiles);
@@ -404,28 +414,30 @@ export class ContextManager {
       out.push(currentRequest.message);
     }
 
-    if (this.objective) {
+    if (!isCasual && this.objective) {
       const text = `Objetivo da tarefa: ${this.objective}`;
       budget.add('objetivo', text);
       out.push({ role: 'system', content: text });
     }
 
-    if (this.taskState) {
+    if (!isCasual && this.taskState) {
       const text = renderTaskState(this.taskState);
       budget.add('estado da tarefa', text);
       out.push({ role: 'system', content: text });
     }
 
-    if (this.continuity) {
+    if (!isCasual && this.continuity) {
       const text = this.renderContinuity(this.continuity);
       budget.add('continuidade', text);
       out.push({ role: 'system', content: text });
     }
 
-    const activeFilesBlock = this.renderActiveFiles(activeFiles);
-    if (activeFilesBlock) {
-      budget.add('arquivos ativos', activeFilesBlock);
-      out.push({ role: 'system', content: activeFilesBlock });
+    if (!isCasual) {
+      const activeFilesBlock = this.renderActiveFiles(activeFiles);
+      if (activeFilesBlock) {
+        budget.add('arquivos ativos', activeFilesBlock);
+        out.push({ role: 'system', content: activeFilesBlock });
+      }
     }
 
     const summaryEntries = this.entries.filter((e) => e.type === 'summary').slice(-3);
@@ -691,7 +703,7 @@ export class ContextManager {
   }
 
   private buildSystemPrompt(): string {
-    return `Voce e "master-code", um agente de engenharia de software que trabalha dentro de um terminal, como o Claude Code ou o opencode.
+    const base = `Voce e "master-code", um agente de engenharia de software que trabalha dentro de um terminal, como o Claude Code ou o opencode.
 
 Voce ajuda o usuario a criar, modificar, entender e testar codigo.
 
@@ -705,6 +717,10 @@ Diretrizes:
 - Ao final, resuma brevemente o que foi feito.
 
 Partes marcadas como "Objetivo da tarefa", "estado da tarefa", "[continuidade da tarefa]", "[resumo]", "[memoria]", "[contexto recuperado]", "[decisao]", "[erro]", "[alteracao]", "[arquivos ativos]" e "[instrucoes de seguranca]" sao contexto preservado de iteracoes anteriores. Use-os para manter continuidade, mesmo apos o historico ser compactado. Contexto marcado como obsoleto ou irrelevante deve ser ignorado.`;
+
+    return `${base}
+
+${modeSystemPrompt(this.mode)}`;
   }
 
   async compactIfNeeded(): Promise<boolean> {
@@ -935,6 +951,7 @@ Partes marcadas como "Objetivo da tarefa", "estado da tarefa", "[continuidade da
       id: this.opts.sessionId,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
+      mode: this.mode,
       objective: this.objective,
       entries: this.entries,
       archive: this.archive,
@@ -955,6 +972,7 @@ Partes marcadas como "Objetivo da tarefa", "estado da tarefa", "[continuidade da
     this.entries = s.entries ?? [];
     this.archive = s.archive ?? [];
     this.objective = s.objective ?? null;
+    this.mode = s.mode ?? 'build';
     this.taskState = s.taskState ?? null;
     this.continuity = s.continuity ?? null;
     this.memory = new ProjectMemory();

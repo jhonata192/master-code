@@ -7,7 +7,10 @@ import type { ConfirmFn } from './tools.js';
 import { getContextManager } from './session.js';
 import type { ContextManager } from './context/manager.js';
 import type { StoredMessage } from './context/types.js';
+import { detectIntent } from './context/intent.js';
 import { classifyToolResult } from './context/manager.js';
+import type { AgentMode } from './modes.js';
+import { authorizeTool, toolsForMode } from './modes.js';
 import type OpenAI from 'openai';
 import { EventBus } from './events/bus.js';
 import type { AgentEvent, ToolCall, ToolStatus } from './events/types.js';
@@ -34,6 +37,8 @@ export interface RunTaskOptions {
   confirm?: ConfirmFn;
   bus?: EventBus;
   deps?: RunTaskDeps;
+  intent?: 'casual' | 'question' | 'task';
+  mode?: AgentMode;
 }
 
 export class CancelledError extends Error {
@@ -83,24 +88,40 @@ export async function runTask(prompt: string, opts: RunTaskOptions = {}): Promis
   const model = opts.deps?.config ? config.model : await pickModel();
   const ctx = opts.deps?.ctx ?? (await getContextManager());
 
-  ctx.startTask(prompt);
-  ctx.addUserMessage(prompt);
-  await ctx.persist();
+  const detected = detectIntent(prompt).intent;
+  const isTaskIntent = detected !== 'casual' && detected !== 'question';
+  const intent = opts.intent ?? (isTaskIntent ? 'task' : detected);
+  const allowTools = intent === 'task';
+  const mode = opts.mode ?? ctx.mode;
+  const toolset = allowTools ? toolsForMode(mode, tools) : [];
 
-  emit({ type: 'task_start', task: prompt, model });
+  if (mode === 'plan') {
+    emit({ type: 'agent', message: `[mode] ${mode.toUpperCase()}` });
+  }
 
-  const ts = ctx.getTaskState();
-  if (ts && ts.subtasks.length > 0) {
-    emit({
-      type: 'plan',
-      steps: ts.subtasks.length,
-      summary: ts.subtasks.slice(0, 3).join(' -> '),
-    });
-    ts.subtasks.forEach((title, i) =>
-      emit({ type: 'task_step', index: i + 1, total: ts.subtasks.length, title })
-    );
+  if (allowTools) {
+    ctx.startTask(prompt);
+    ctx.addUserMessage(prompt);
+    await ctx.persist();
+
+    emit({ type: 'task_start', task: prompt, model });
+
+    const ts = ctx.getTaskState();
+    if (ts && ts.subtasks.length > 0) {
+      emit({
+        type: 'plan',
+        steps: ts.subtasks.length,
+        summary: ts.subtasks.slice(0, 3).join(' -> '),
+      });
+      ts.subtasks.forEach((title, i) =>
+        emit({ type: 'task_step', index: i + 1, total: ts.subtasks.length, title })
+      );
+    } else {
+      emit({ type: 'plan', steps: 1, summary: prompt });
+    }
   } else {
-    emit({ type: 'plan', steps: 1, summary: prompt });
+    ctx.addUserMessage(prompt);
+    await ctx.persist();
   }
 
   let iterations = 0;
@@ -125,7 +146,7 @@ export async function runTask(prompt: string, opts: RunTaskOptions = {}): Promis
       try {
         await streamCompletion(
           client,
-          { model, messages, tools },
+          { model, messages, tools: toolset },
           {
             onText: (t) => {
               textBuf += t;
@@ -165,7 +186,7 @@ export async function runTask(prompt: string, opts: RunTaskOptions = {}): Promis
           function: { name: t.name, arguments: t.args || '{}' },
         }));
 
-      if (toolCalls.length > 0) {
+      if (allowTools && toolCalls.length > 0) {
         ctx.addMessage(
           {
             role: 'assistant',
@@ -195,6 +216,23 @@ export async function runTask(prompt: string, opts: RunTaskOptions = {}): Promis
 
         for (const call of calls) {
           if (signal?.aborted) throw new CancelledError();
+          const gate = authorizeTool(mode, call.tool, call.args);
+          emit({
+            type: 'tool_gate',
+            mode: mode.toUpperCase(),
+            tool: call.tool,
+            allowed: gate.allowed,
+            reason: gate.reason,
+          });
+          if (!gate.allowed) {
+            ctx.addToolMessage(
+              call.tool,
+              `[tool-gate] mode=${mode.toUpperCase()} tool=${call.tool} allowed=false${gate.reason ? ` reason=${gate.reason}` : ''}`,
+              ['mode', 'bloqueado'],
+              'temporary'
+            );
+            continue;
+          }
           emit({ type: 'tool_call_start', call: { ...call } });
           emit({ type: 'tool_call_end', call: { ...call } });
 

@@ -1,10 +1,14 @@
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
+export type AgentMode = 'build' | 'plan';
+
 export type EntryScope = 'task' | 'project';
 
 export type EntrySource = 'explicit' | 'implicit';
 
 export type IntentKind =
+  | 'casual'
+  | 'question'
   | 'bugfix'
   | 'feature'
   | 'refactor'
@@ -129,6 +133,7 @@ export interface SerializedSession {
   id: string;
   createdAt: number;
   updatedAt: number;
+  mode?: AgentMode;
   objective: string | null;
   entries: ContextEntry[];
   archive: ArchiveRecord[];
@@ -155,6 +160,7 @@ export interface ContextManagerOptions {
   projectRoot: string;
   windowTokens: number;
   compactRatio: number;
+  mode?: AgentMode;
   semanticRetriever?: SemanticRetrieverLike;
   hybridRetriever?: HybridRetrieverLike;
 }

@@ -11,6 +11,7 @@ import { AgentRenderer, parseCliFlags } from './render.js';
 import type { RenderMode } from './render.js';
 import { TraceStore } from './events/trace.js';
 import { tools as allTools } from './tools.js';
+import { detectIntent } from './context/intent.js';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -19,10 +20,17 @@ import {
   setModel,
   setAutoModel,
   maskKey,
+  getActiveProvider,
+  activeProviderId,
+  providerLabel,
+  PROVIDER_IDS,
+  PROVIDER_META,
   CONFIG_PATH,
 } from './config.js';
+import type { ProviderId } from './config.js';
 import { listModels, listCodingModels } from './llm.js';
 import { getContextManager, resetContextManager } from './session.js';
+import { switchModeForward, switchModeReverse, MODE_LABEL } from './modes.js';
 import {
   UpdateService,
   getCurrentVersion,
@@ -52,6 +60,21 @@ function renderBox(lines: string[]): string {
   const body = lines.map((l) => '│ ' + l.padEnd(width - 1) + '│');
   const bottom = '└' + '─'.repeat(width) + '┘';
   return [border, ...body, bottom].join('\n');
+}
+
+function casualReply(prompt: string): string {
+  const t = prompt.toLowerCase();
+  if (/(obrigad|valeu|agradec|thanks|thank you)/i.test(t)) {
+    return 'De nada! Sempre que precisar de ajuda com o codigo, e so chamar.';
+  }
+  if (/^(tchau|ate logo|ate mais|adeus|bye|flw|falou|vou indo)/i.test(t)) {
+    return 'Ate mais! Qualquer coisa, estou por aqui.';
+  }
+  if (/^(quem e voce|quem é voce|o que voce e|o que você é)/i.test(t)) {
+    return 'Sou o master-code, um agente de engenharia de software que roda no terminal. ' +
+      'Posso criar, editar, entender e testar codigo no diretorio atual.';
+  }
+  return 'Oi! Tudo bem? Posso ajudar a criar, corrigir ou entender codigo neste diretorio.';
 }
 
 function fmtBytes(n: number): string {
@@ -92,6 +115,13 @@ function startEscListener(onEsc: () => void): () => void {
 }
 
 async function handleTask(prompt: string): Promise<void> {
+  const detected = detectIntent(prompt).intent;
+  if (detected === 'casual') {
+    console.log(casualReply(prompt));
+    return;
+  }
+  const intent = detected === 'question' ? 'question' : 'task';
+
   const controller = new AbortController();
   let stopEsc: (() => void) | undefined;
   let escActive = false;
@@ -144,6 +174,7 @@ async function handleTask(prompt: string): Promise<void> {
       bus,
       signal: controller.signal,
       confirm,
+      intent,
     });
     clearLine();
     if (renderMode !== 'quiet') {
@@ -178,13 +209,41 @@ function describeModel(c: {
 
 async function cmdStatus(): Promise<void> {
   const c = await loadConfig();
+  const p = getActiveProvider(c);
+  const ctx = await getContextManager();
   console.log(chalk.bold('Status'));
   console.log('  Config:       ' + chalk.gray(CONFIG_PATH));
-  console.log('  Base URL:     ' + chalk.gray(c.provider.baseUrl));
-  console.log('  API key:      ' + chalk.gray(maskKey(c.provider.apiKey)));
+  console.log('  Provedor:     ' + chalk.gray(providerLabel(activeProviderId(c))));
+  console.log('  Base URL:     ' + chalk.gray(p.baseUrl));
+  console.log('  API key:      ' + chalk.gray(maskKey(p.apiKey)));
   console.log('  Modelo:       ' + chalk.gray(describeModel(c)));
   console.log('  Iteracoes:    ' + chalk.gray(String(c.maxIterations)));
   console.log('  Janela ctx:   ' + chalk.gray(c.contextWindow + ' tokens'));
+  console.log('  Modo:         ' + chalk.gray(MODE_LABEL[ctx.mode]));
+}
+
+function modePromptText(mode: 'build' | 'plan', modelLabel: string): string {
+  return chalk.green(`\n[${MODE_LABEL[mode]}] ${chalk.gray(modelLabel)} > `);
+}
+
+async function cmdMode(arg: string): Promise<void> {
+  const ctx = await getContextManager();
+  const t = arg.trim().toLowerCase();
+  let next: 'build' | 'plan' | null = null;
+  if (t === 'build' || t === 'plan') next = t;
+  else if (t === '') next = ctx.mode === 'build' ? 'plan' : 'build';
+  if (!next) {
+    console.log(chalk.gray('Uso: /mode [build|plan] (sem argumento alterna o modo)'));
+    return;
+  }
+  if (next === ctx.mode) {
+    console.log(chalk.gray('Modo atual: ' + MODE_LABEL[next]));
+    return;
+  }
+  const from = ctx.mode;
+  ctx.setMode(next);
+  await ctx.persist();
+  console.log(chalk.cyan(`Modo alterado para ${MODE_LABEL[next]}. (era ${MODE_LABEL[from]})`));
 }
 
 async function cmdContexto(): Promise<void> {
@@ -265,20 +324,45 @@ function cmdTools(): void {
 
 async function cmdProvider(): Promise<void> {
   const c = await loadConfig();
-  console.log('Provedor atual: ' + c.provider.baseUrl);
-  console.log('API key atual:  ' + maskKey(c.provider.apiKey));
+  const active = activeProviderId(c);
+  const activeCfg = getActiveProvider(c);
+  console.log('Provedor atual: ' + chalk.gray(providerLabel(active)) + ' (' + activeCfg.baseUrl + ')');
+  console.log('API key atual:  ' + chalk.gray(maskKey(activeCfg.apiKey)));
+  console.log('');
+  PROVIDER_IDS.forEach((id, i) => {
+    const cfg = c.providers?.[id];
+    const status = cfg?.apiKey ? 'configurado' : 'sem chave';
+    console.log(`  ${chalk.cyan(String(i + 1).padStart(2))}) ${providerLabel(id)} - ${chalk.gray(status)}`);
+  });
+
+  const sel = await askAutocomplete(
+    chalk.yellow(`\nProvedor a configurar [1-${PROVIDER_IDS.length}] (Enter para manter ${providerLabel(active)}): `),
+    () => []
+  );
+  const t = sel.trim();
+  let id: ProviderId = active;
+  if (t) {
+    const n = Number(t);
+    if (!Number.isNaN(n) && Number.isInteger(n) && n >= 1 && n <= PROVIDER_IDS.length) {
+      id = PROVIDER_IDS[n - 1];
+    } else {
+      console.log(chalk.gray('Selecao invalida; mantendo ' + providerLabel(id) + '.'));
+    }
+  }
+
+  const current = c.providers?.[id] ?? { baseUrl: PROVIDER_META[id].baseUrl, apiKey: '' };
   const key = await askAutocomplete(
-    chalk.yellow('Nova NVIDIA API key (Enter para manter): '),
+    chalk.yellow(`Nova API key para ${providerLabel(id)} (Enter para manter [${maskKey(current.apiKey)}]): `),
     () => []
   );
   const keyTrim = key.trim();
   const base = await askAutocomplete(
-    chalk.yellow(`Base URL (Enter para manter [${c.provider.baseUrl}]): `),
+    chalk.yellow(`Base URL (Enter para manter [${current.baseUrl}]): `),
     () => []
   );
   const baseTrim = base.trim();
-  await setProvider(keyTrim || c.provider.apiKey, baseTrim || c.provider.baseUrl);
-  console.log(chalk.green('Provedor salvo.'));
+  await setProvider(id, keyTrim || current.apiKey, baseTrim || current.baseUrl);
+  console.log(chalk.green(`Provedor ${providerLabel(id)} salvo.`));
 }
 
 function suggestModelsIn(list: string[], buf: string): Suggestion[] {
@@ -304,11 +388,13 @@ function suggestModelsSearch(models: string[], buf: string): Suggestion[] {
 
 async function cmdModel(): Promise<void> {
   const c = await loadConfig();
+  const p = getActiveProvider(c);
   console.log('Modelo atual: ' + describeModel(c));
-  console.log(chalk.gray('Buscando modelos do NVIDIA NIM...'));
+  console.log(chalk.gray(`Buscando modelos de ${providerLabel(activeProviderId(c))}...`));
   const models = await listModels();
   if (models.length === 0) {
-    console.log(chalk.red('Nenhum modelo listado. Configure /provider primeiro.'));
+    console.log(chalk.red('Nenhum modelo listado pela API do provedor.'));
+    console.log(chalk.gray('  Verifique a API key em /provider e sua conexao.'));
     return;
   }
 
@@ -351,6 +437,11 @@ async function cmdModel(): Promise<void> {
 
     if (t.toLowerCase() === 'auto') {
       const coding = await listCodingModels();
+      if (coding.length === 0) {
+        console.log(chalk.yellow('Nenhum modelo de codigo listado pela API do provedor.'));
+        console.log(chalk.gray('  Verifique a API key em /provider e tente novamente.'));
+        return;
+      }
       await setAutoModel(coding);
       console.log(chalk.green(`Auto-rotacao ativada com ${coding.length} modelos de codigo.`));
       return;
@@ -376,9 +467,10 @@ async function cmdModel(): Promise<void> {
 
 function printHelp(): void {
   console.log(chalk.bold('Comandos'));
-  console.log('  /provider  Configurar NVIDIA (API key e base URL)');
+  console.log('  /provider  Escolher provedor (NVIDIA NIM / OpenRouter) e configurar API key/base URL');
   console.log('  /model     Escolher modelo fixo ou AUTO. Dentro: /search p/ buscar com autocomplete');
   console.log('  /status    Mostrar configuracao atual');
+  console.log('  /mode      Trocar de modo (BUILD/PLAN). Sem argumento alterna. Ou use Tab/Shift+Tab');
   console.log('  /contexto  Mostrar o estado do contexto da sessao');
   console.log('  /memoria   Listar a memoria persistente do projeto');
   console.log('  /limpar    Limpar o contexto e comecar sessao nova');
@@ -399,6 +491,11 @@ function printHelp(): void {
   console.log(chalk.bold('Autocomplete'));
   console.log('  Digite e veja a sugestao em cinza. Enter aceita a 1a sugestao, Tab completa,');
   console.log('  Ctrl+U limpa, Ctrl+C sai.');
+  console.log('');
+  console.log(chalk.bold('Modos'));
+  console.log('  Tab alterna BUILD -> PLAN; Shift+Tab alterna PLAN -> BUILD.');
+  console.log('  BUILD: o agente pode modificar o projeto. PLAN: somente leitura e analise.');
+  console.log('  O modo atual aparece no prompt ([BUILD] / [PLAN]).');
 }
 
 async function cmdVersion(): Promise<void> {
@@ -604,6 +701,9 @@ async function handleSlash(raw: string): Promise<void> {
     case '/status':
       await cmdStatus();
       break;
+    case '/mode':
+      await cmdMode(sub);
+      break;
     case '/contexto':
       await cmdContexto();
       break;
@@ -650,6 +750,7 @@ const COMMANDS: string[] = [
   '/provider',
   '/model',
   '/status',
+  '/mode',
   '/contexto',
   '/memoria',
   '/limpar',
@@ -727,9 +828,14 @@ async function main(): Promise<void> {
   }
 
   const c = await loadConfig();
-  console.log(chalk.bold.cyan('master-code') + ' — agente de codigo via NVIDIA NIM');
+  const p = getActiveProvider(c);
+  console.log(chalk.bold.cyan('master-code') + ' — agente de codigo via IA');
   console.log(
-    chalk.gray('Modelo: ' + describeModel(c) + '  |  API key: ' + maskKey(c.provider.apiKey))
+    chalk.gray(
+      'Provedor: ' + providerLabel(activeProviderId(c)) +
+      '  |  Modelo: ' + describeModel(c) +
+      '  |  API key: ' + maskKey(p.apiKey)
+    )
   );
   console.log(
     chalk.gray('Versao ' + getCurrentVersion() + '  |  Comandos: /provider /model /status /version /update /trace /tools /help | sair para sair' + (renderMode !== 'normal' ? '  |  modo: ' + renderMode : ''))
@@ -739,8 +845,19 @@ async function main(): Promise<void> {
   void runAutoUpdateCheck();
 
   try {
+    const ctx = await getContextManager();
+    const modelLabel = describeModel(await loadConfig());
+    const promptFor = (m: 'build' | 'plan'): string => modePromptText(m, modelLabel);
     for (;;) {
-      const answer = await askAutocomplete(chalk.green('\n> '), suggestCommands);
+      const answer = await askAutocomplete(promptFor(ctx.mode), suggestCommands, {
+        modeKey: (dir) => {
+          const from = ctx.mode;
+          ctx.setMode(dir === 'next' ? switchModeForward(from) : switchModeReverse(from));
+          void ctx.persist();
+          console.log(chalk.cyan(`Modo alterado para ${MODE_LABEL[ctx.mode]}.`));
+          return promptFor(ctx.mode);
+        },
+      });
       if (inputClosed()) break;
       const t = answer.trim();
       if (!t) continue;

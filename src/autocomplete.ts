@@ -11,6 +11,7 @@ export type Completer = (input: string) => Suggestion[];
 
 export interface AskOptions {
   enterCompletes?: boolean;
+  modeKey?: (dir: 'next' | 'prev') => string;
 }
 
 let closed = false;
@@ -63,6 +64,7 @@ export function askAutocomplete(
 
     let buffer = '';
     let suggestions: Suggestion[] = [];
+    let currentPrompt = prompt;
 
     const compute = (): Suggestion[] => {
       try {
@@ -77,7 +79,7 @@ export function askAutocomplete(
       const sug = suggestions[0]?.display ?? '';
       const remaining = sug.startsWith(buffer) ? sug.slice(buffer.length) : '';
       const suffix = remaining ? chalk.gray(remaining) : '';
-      stdout.write('\r\x1b[K' + prompt + buffer + suffix);
+      stdout.write('\r\x1b[K' + currentPrompt + buffer + suffix);
     };
 
     const cleanup = (): void => {
@@ -112,7 +114,17 @@ export function askAutocomplete(
         return;
       }
       if (key.name === 'tab' || (key.name === 'right' && suggestions[0])) {
+        if (key.shift) {
+          if (options.modeKey) {
+            currentPrompt = options.modeKey('prev');
+            render();
+          }
+          return;
+        }
         if (suggestions[0]) buffer = suggestions[0].value;
+        else if (options.modeKey) {
+          currentPrompt = options.modeKey('next');
+        }
         render();
         return;
       }

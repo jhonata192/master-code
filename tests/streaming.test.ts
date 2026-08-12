@@ -94,11 +94,11 @@ interface FakeStep {
 
 function makeClient(steps: FakeStep[]): {
   client: any;
-  calls: Array<{ stream: boolean }>;
+  calls: Array<{ stream: boolean; body?: any }>;
 } {
-  const calls: Array<{ stream: boolean }> = [];
+  const calls: Array<{ stream: boolean; body?: any }> = [];
   const create = async (body: any) => {
-    calls.push({ stream: body.stream === true });
+    calls.push({ stream: body.stream === true, body });
     const step = steps.shift();
     if (!step) throw new Error('fake client sem respostas restantes');
     if (step.kind === 'error') throw step.err;
@@ -491,6 +491,31 @@ test('15. streamCompletion: erro nao-retryable no inicio faz fallback completo',
   assert.equal(text, 'full text');
   assert.equal(reason, 'stop');
   assert.equal(fake.calls[1].stream, false);
+});
+
+test('15b. streamCompletion: envia penalidades de repeticao por padrao', async () => {
+  const fake = makeClient([
+    { kind: 'stream', gen: genStream([textChunk('x'), finishChunk('stop')]) },
+  ]);
+  await streamCompletion(fake.client as any, { model: 'm', messages: [], tools: [] }, {});
+  assert.equal(fake.calls[0].body.frequency_penalty, 0.6);
+  assert.equal(fake.calls[0].body.presence_penalty, 0.5);
+  assert.equal(fake.calls[0].body.stream_options.include_usage, true);
+});
+
+test('15c. streamCompletion: penalidades rejeitadas (400) sao removidas', async () => {
+  const fake = makeClient([
+    { kind: 'error', err: { status: 400, message: 'stream_options not supported' } },
+    { kind: 'error', err: { status: 400, message: 'frequency_penalty not supported' } },
+    { kind: 'stream', gen: genStream([textChunk('final'), finishChunk('stop')]) },
+  ]);
+  let text = '';
+  await streamCompletion(fake.client as any, { model: 'm', messages: [], tools: [] }, { onText: (t) => (text += t) });
+  assert.equal(text, 'final');
+  assert.equal(fake.calls.length, 3);
+  assert.equal(fake.calls[1].stream_options, undefined, 'stream_options removido apos 400');
+  assert.equal(fake.calls[2].frequency_penalty, undefined, 'penalidade removida apos 400');
+  assert.equal(fake.calls[2].presence_penalty, undefined);
 });
 
 test('16. falha persistente do provider produz eventos de erro', async () => {
