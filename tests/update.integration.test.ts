@@ -133,12 +133,12 @@ async function resetConfig(): Promise<void> {
 test('1. check contra servidor local descobre versao nova', async () => {
   await resetConfig();
   const content = Buffer.from('exe-content-1');
-  const srv = await makeServer({ version: '0.4.0', installerContent: content });
+  const srv = await makeServer({ version: '9.9.9', installerContent: content });
   try {
     const svc = new UpdateService({ client: makeClient(srv.url) });
     const res = await svc.check(true);
     assert.equal(res.ok, true);
-    assert.equal(res.latestVersion, '0.4.0');
+    assert.equal(res.latestVersion, '9.9.9');
     assert.equal(res.updateAvailable, true);
     assert.ok(res.release);
   } finally {
@@ -149,13 +149,13 @@ test('1. check contra servidor local descobre versao nova', async () => {
 test('2. download baixa, valida checksum e persiste', async () => {
   await resetConfig();
   const content = Buffer.from('exe-content-2'.repeat(50));
-  const srv = await makeServer({ version: '0.4.0', installerContent: content });
+  const srv = await makeServer({ version: '9.9.9', installerContent: content });
   try {
     const svc = new UpdateService({ client: makeClient(srv.url) });
     const res = await svc.download();
     assert.equal(res.ok, true, res.error);
-    assert.equal(res.version, '0.4.0');
-    assert.equal(res.fileName, 'master-code-setup-0.4.0.exe');
+    assert.equal(res.version, '9.9.9');
+    assert.equal(res.fileName, 'master-code-setup-9.9.9.exe');
     assert.equal(res.size, content.length);
     assert.equal(res.checksum, sha256Hex(content));
 
@@ -164,14 +164,14 @@ test('2. download baixa, valida checksum e persiste', async () => {
 
     const cfg = await import('../src/config.js');
     assert.equal(cfg.configDir(), configDir());
-    const expected = path.join(configDir(), 'updates', 'master-code-setup-0.4.0.exe');
+    const expected = path.join(configDir(), 'updates', 'master-code-setup-9.9.9.exe');
     assert.equal(filePath, expected);
     assert.equal(await fs.stat(filePath).then((s) => s.size), content.length);
 
     const st = await svc.status();
     assert.ok(st.downloaded);
-    assert.equal(st.downloaded!.version, '0.4.0');
-    assert.equal(st.downloaded!.fileName, 'master-code-setup-0.4.0.exe');
+    assert.equal(st.downloaded!.version, '9.9.9');
+    assert.equal(st.downloaded!.fileName, 'master-code-setup-9.9.9.exe');
   } finally {
     await srv.close();
   }
@@ -181,14 +181,14 @@ test('3. checksum invalido aborta e remove o arquivo', async () => {
   await resetConfig();
   const content = Buffer.from('exe-content-3');
   const badHash = 'f'.repeat(64);
-  const srv = await makeServer({ version: '0.4.0', installerContent: content, checksumLine: `${badHash}  master-code-setup-0.4.0.exe` });
+  const srv = await makeServer({ version: '9.9.9', installerContent: content, checksumLine: `${badHash}  master-code-setup-9.9.9.exe` });
   try {
     const svc = new UpdateService({ client: makeClient(srv.url) });
     const res = await svc.download();
     assert.equal(res.ok, false);
     assert.ok((res.error ?? '').toLowerCase().includes('integridade'));
 
-    const target = path.join(configDir(), 'updates', 'master-code-setup-0.4.0.exe');
+    const target = path.join(configDir(), 'updates', 'master-code-setup-9.9.9.exe');
     await assert.rejects(fs.stat(target), 'arquivo removido apos checksum invalido');
   } finally {
     await srv.close();
@@ -198,7 +198,7 @@ test('3. checksum invalido aborta e remove o arquivo', async () => {
 test('4. checksum ausente do sums aborta com mensagem de integridade', async () => {
   await resetConfig();
   const content = Buffer.from('exe-content-4');
-  const srv = await makeServer({ version: '0.4.0', installerContent: content, checksumLine: `${sha256Hex(content)}  outro-arquivo.exe` });
+  const srv = await makeServer({ version: '9.9.9', installerContent: content, checksumLine: `${sha256Hex(content)}  outro-arquivo.exe` });
   try {
     const svc = new UpdateService({ client: makeClient(srv.url) });
     const res = await svc.download();
@@ -226,7 +226,7 @@ test('5. ja na ultima versao nao baixa', async () => {
 test('6. check usa cache entre chamadas', async () => {
   await resetConfig();
   const content = Buffer.from('exe-content-6');
-  const srv = await makeServer({ version: '0.4.0', installerContent: content });
+  const srv = await makeServer({ version: '9.9.9', installerContent: content });
   try {
     const svc = new UpdateService({ client: makeClient(srv.url), checkIntervalMs: 60 * 60 * 1000 });
     const first = await svc.check(false);
@@ -234,7 +234,7 @@ test('6. check usa cache entre chamadas', async () => {
     assert.equal(first.updateAvailable, true);
     const second = await svc.check(false);
     assert.equal(second.fromCache, true);
-    assert.equal(second.latestVersion, '0.4.0');
+    assert.equal(second.latestVersion, '9.9.9');
   } finally {
     await srv.close();
   }

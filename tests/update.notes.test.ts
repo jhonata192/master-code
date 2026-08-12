@@ -216,7 +216,7 @@ test('13. versao inexistente retorna erro', async () => {
 
 test('14. check() popula cache e notes sem versao usa cache', async () => {
   await reset();
-  const release = makeRelease('v0.4.0', { body: 'Notas do check' });
+  const release = makeRelease('v9.9.9', { body: 'Notas do check' });
   const client = new NotesClient();
   client.latest = release;
   const svc = new UpdateService({ client });
@@ -270,30 +270,30 @@ test('17. offline no getReleaseNotes', async () => {
 test('18. canal beta apresenta notas da prerelease', async () => {
   await reset();
   await setUpdateSettings({ channel: 'beta' as UpdateChannel });
-  const beta = makeRelease('v0.4.0-beta.1', { prerelease: true, body: 'Notas da beta' });
+  const beta = makeRelease('v9.9.9-beta.1', { prerelease: true, body: 'Notas da beta' });
   const client = new NotesClient();
   client.latest = beta;
   const svc = new UpdateService({ client });
 
   const check = await svc.check(true);
   assert.equal(check.ok, true);
-  assert.equal(check.latestVersion, '0.4.0-beta.1');
+  assert.equal(check.latestVersion, '9.9.9-beta.1');
   assert.equal(check.updateAvailable, true);
 
   const notes = await svc.getReleaseNotes();
   assert.equal(notes.ok, true);
-  assert.equal(notes.entry!.tagName, 'v0.4.0-beta.1');
+  assert.equal(notes.entry!.tagName, 'v9.9.9-beta.1');
   assert.equal(notes.entry!.body, 'Notas da beta');
 });
 
 test('19. consulta explicita de versao prerelease respeita a versao pedida', async () => {
   await reset();
-  const pre = makeRelease('v0.4.0-rc.1', { prerelease: true, body: 'Notas do rc' });
+  const pre = makeRelease('v9.9.9-rc.1', { prerelease: true, body: 'Notas do rc' });
   const client = new NotesClient();
   client.byTag = pre;
   const svc = new UpdateService({ client });
-  const res = await svc.getReleaseNotes({ version: '0.4.0-rc.1' });
+  const res = await svc.getReleaseNotes({ version: '9.9.9-rc.1' });
   assert.equal(res.ok, true);
-  assert.equal(res.entry!.version, '0.4.0-rc.1');
+  assert.equal(res.entry!.version, '9.9.9-rc.1');
   assert.equal(res.entry!.body, 'Notas do rc');
 });
