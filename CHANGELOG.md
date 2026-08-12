@@ -68,3 +68,18 @@ Commits*).
 
 - release: atualiza CHANGELOG para 0.1.0
 
+## [0.4.0] - 2026-08-12
+
+### Adicionado
+
+- modos build/plan, intencao casual/question e multi-provider (nvidia/openrouter)
+
+### Corrigido
+
+- tests: usa versao futura fixa nos testes de update (imune a bump de versao)
+
+### Outros
+
+- release: prepara 0.4.0
+- release: atualiza CHANGELOG para 0.3.0
+
